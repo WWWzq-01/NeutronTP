@@ -63,9 +63,12 @@ class COO_Graph(BasicGraph):
         # 构造函数，初始化 COO 图
         self.preprocess_for = preprocess_for
         self.cache_path = GraphCache.full_graph_path(name, preprocess_for)
+        print('GraphCache path:', self.cache_path)
         if full_graph_cache_enabled and os.path.exists(self.cache_path):
+            print("Loading cached graph from", self.cache_path)
             cached_attr_dict = GraphCache.load_dict(self.cache_path)
         else:
+            print("Preprocessing graph", name, "for", preprocess_for)
             src_data = datasets.load_dataset(name)
             cached_attr_dict = graph_utils.preprocess(name, src_data, preprocess_for)  # norm feat, remove edge_index, add adj
             GraphCache.save_dict(cached_attr_dict, self.cache_path)

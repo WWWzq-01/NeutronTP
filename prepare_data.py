@@ -6,14 +6,14 @@ import argparse
 
 def main():
     cached = True
-    r = coo_graph.COO_Graph_Full('cora')
+    # r = coo_graph.COO_Graph_Full('arxiv')
     # r = coo_graph.COO_Graph('reddit')
     # r = coo_graph.COO_Graph('test', full_graph_cache_enabled=cached)
-    # r = coo_graph.COO_Graph('flickr', full_graph_cache_enabled=cached)
+    r = coo_graph.COO_Graph('flickr', full_graph_cache_enabled=cached)
     # r = coo_graph.COO_Graph('reddit', full_graph_cache_enabled=cached)
     # r = coo_graph.COO_Graph('ogbn-arxiv', full_graph_cache_enabled=cached)
     # r.partition(8)
-    r.partition(2)
+    r.partition(4)
     return
     # for name in ['amazon-products', 'ogbn-products']:
     # for name in ['ogbn-arxiv', 'ogbn-products']:

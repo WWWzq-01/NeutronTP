@@ -8,6 +8,7 @@ from torch.utils import cpp_extension
 ext_name = 'spmm_cpp'
 cpp_src = 'spmm.cpp' 
 
+print(torch.version.cuda)
 if torch.version.cuda.startswith('10'):
     cpp_src = 'spmm_original.cpp' 
 

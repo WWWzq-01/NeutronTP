@@ -52,7 +52,8 @@ class DistTimer:
             if len(data) == 1:
                 avg_dict[key], std_dict[key] = data[0], data[0]  #single GPU
             else:
-                avg_dict[key], std_dict[key] = statistics.mean(data), statistics.stdev(data)       
+                avg_dict[key], std_dict[key] = statistics.mean(data), statistics.stdev(data)    
+        print("Average and std of durations across all ranks:")   
         s = '\ntimer summary:\n' +  "\n".join("%6.2fs %6.2fs %5d %s" % (avg_dict[key], std_dict[key], self.count_dict[key], key) for key in self.duration_dict)
         return s
 

@@ -102,6 +102,7 @@ def main(env, args):
     env.logger.log('proc begin:', env)
     with env.timer.timing('total'):
         # 使用 Parted_COO_Graph 加载分布式环境下的图数据
+        print("world size",env.world_size)
         if args.model == 'TensplitGCN':
             print(f"Rank: {env.rank}, world_size: {env.world_size}")
             g = Full_COO_Graph(args.dataset, env.rank, env.world_size, env.device, env.half_enabled, env.csr_enabled) #不再切分图邻接矩阵, 但feature按worker数均分

@@ -87,6 +87,7 @@ def prepare_pyg_dataset(pyg_name, tag):
                        'yelp': torch_geometric.datasets.Yelp,
                         'amazon-products': torch_geometric.datasets.AmazonProducts,
                         }
+    print('pyg dataset root:', pyg_root)
     # 加载 PyTorch Geometric 数据集
     pyg_dataset: torch_geometric.data.Dataset = dataset_sources[pyg_name](root=os.path.join(pyg_root, pyg_name))
     print('pyg dataset', pyg_name, 'loaded')
