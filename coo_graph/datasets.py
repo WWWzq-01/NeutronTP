@@ -9,9 +9,59 @@ import torch
 data_root = os.path.join(os.path.dirname(__file__), '..', 'data')
 dgl_root = os.path.join(data_root, 'dgl_datasets')
 pyg_root = os.path.join(data_root, 'pyg_datasets')
+user_root = os.path.join("/home/lzl/nfs.d/dataset/graph_embedding/LinkPrediction/train_data/")
+rmat_root = os.path.join("/home/lzl/nfs.d/dataset/graph_embedding/graph_data/")
 # 确保目录存在，如果不存在则创建
 for path in [data_root, dgl_root, pyg_root]:
     os.makedirs(path, exist_ok=True)
+
+# --- 新增：用户自定义数据集配置字典 ---
+USER_DATASET_CONFIG = {
+    'com': {
+        'edgelist_path': os.path.join(user_root, 'com_srt_weg_cn_train.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'LJ': {
+        'edgelist_path': os.path.join(user_root, 'LJ_srt_wei_cn_train.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 16,
+    },
+    'soc': {
+        'edgelist_path': os.path.join(user_root, 'soc_srt_wei_cn_train.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'wv': {
+        'edgelist_path': os.path.join(user_root, 'wv_srt_weg_cn_train.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'ytb': {
+        'edgelist_path': os.path.join(user_root, 'ytb_srt_weg_cn_train.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'twt': {
+        'edgelist_path': os.path.join(user_root, 'twt.edge'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'rmat5': {
+        'edgelist_path': os.path.join(rmat_root, 'rmat5_srt.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'rmat6': {
+        'edgelist_path': os.path.join(rmat_root, 'rmat6_srt.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'rmat7': {
+        'edgelist_path': os.path.join(rmat_root, 'rmat7_srt.txt'),
+        'feature_dim': 128, 'hidden_dim': 128, 'num_classes': 10,
+    },
+    'rmat8': {
+        'edgelist_path': os.path.join(rmat_root, 'rmat8_srt.txt'),
+        'feature_dim': 10, 'hidden_dim': 5, 'num_classes': 2,
+    },
+    'rmat9': {
+        'edgelist_path': os.path.join(rmat_root, 'rmat9_srt.txt'),
+        'feature_dim': 5, 'hidden_dim': 3, 'num_classes': 2,
+    },
+}
 
 # 保存图数据集的函数
 def save_dataset(edge_index, features, labels, train_mask, val_mask, test_mask, num_nodes, num_edges, num_classes, name):
@@ -61,6 +111,103 @@ def prepare_dgl_dataset(dgl_name, tag):
     save_dataset(edge_index, g.ndata['feat'], g.ndata['label'],
                  g.ndata['train_mask'], g.ndata['val_mask'], g.ndata['test_mask'],
                  g.num_nodes(), g.num_edges(), dgl_dataset.num_classes, tag)
+
+def prepare_user_dataset_from_edgelist(tag):
+    """
+    从边列表文件生成完整的数据集，包含随机特征和标签，并将所有节点设置为训练集，
+    最后保存为 NeutronTP 所需的 .torch 格式。
+    """
+    import numpy as np
+    config = USER_DATASET_CONFIG[tag]
+    edgelist_path = config['edgelist_path']
+    num_classes = config['num_classes']
+    feature_dim = config['feature_dim']
+    # 加载边列表
+    print(f"Loading edge list from: {edgelist_path}")
+    if not os.path.exists(edgelist_path):
+        raise FileNotFoundError(f"Edgelist file not found at: {edgelist_path}")
+        
+    edge_data = np.loadtxt(edgelist_path, dtype=int)
+    
+    # 检查并处理带权重的边列表
+    if edge_data.shape[1] == 3:
+        print("Detected weighted edge list (3 columns). Using only source and target nodes.")
+        edges_list = edge_data[:, :2]
+    elif edge_data.shape[1] == 2:
+        edges_list = edge_data
+    else:
+        raise ValueError("Edge list file should have 2 or 3 columns.")
+
+    # 获取节点和边的数量
+    num_nodes = int(edges_list.max()) + 1
+    num_edges = edges_list.shape[0]
+    print(f"Detected {num_nodes} nodes and {num_edges} edges.")
+
+    # 生成随机特征
+    print(f"Generating {feature_dim}-dimensional features...")
+    features = np.random.randn(num_nodes, feature_dim).astype(np.float32)
+    # 特征归一化
+    norm = np.linalg.norm(features, axis=1, keepdims=True)
+    features = features / np.where(norm == 0, 1, norm)
+
+    # 生成随机标签
+    print(f"Generating {num_classes} classes of random labels...")
+    labels = np.random.randint(0, num_classes, size=num_nodes)
+
+    print("Splitting nodes into training (50%), validation (10%), and test (40%) sets...")
+    
+    # 创建一个随机排列的索引
+    indices = np.arange(num_nodes)
+    np.random.shuffle(indices)
+
+    # 定义划分比例
+    train_ratio = 0.5
+    val_ratio = 0.1
+    
+    # 计算各个集合的大小
+    train_size = int(num_nodes * train_ratio)
+    val_size = int(num_nodes * val_ratio)
+    
+    # 分配索引
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size : train_size + val_size]
+    test_indices = indices[train_size + val_size :]
+    
+    # 创建掩码
+    train_mask = np.zeros(num_nodes, dtype=bool)
+    val_mask = np.zeros(num_nodes, dtype=bool)
+    test_mask = np.zeros(num_nodes, dtype=bool)
+    
+    train_mask[train_indices] = True
+    val_mask[val_indices] = True
+    test_mask[test_indices] = True
+    
+    print(f"Train nodes: {train_mask.sum()}, Validation nodes: {val_mask.sum()}, Test nodes: {test_mask.sum()}")
+    
+    # 将Numpy数组转换为PyTorch张量以符合 save_dataset 的要求
+    edge_index_tensor = torch.from_numpy(edges_list.T).int()
+    features_tensor = torch.from_numpy(features)
+    labels_tensor = torch.from_numpy(labels)
+    train_mask_tensor = torch.from_numpy(train_mask)
+    val_mask_tensor = torch.from_numpy(val_mask)
+    test_mask_tensor = torch.from_numpy(test_mask)
+
+    print("Saving dataset in NeutronTP format...")
+    # 调用系统中已有的 save_dataset 函数
+    save_dataset(
+        edge_index=edge_index_tensor,
+        features=features_tensor,
+        labels=labels_tensor,
+        train_mask=train_mask_tensor,
+        val_mask=val_mask_tensor,
+        test_mask=test_mask_tensor,
+        num_nodes=num_nodes,
+        num_edges=num_edges,
+        num_classes=num_classes,
+        name=tag
+    )
+    print(f"Dataset '{tag}' saved successfully.")
+    
 
 
 # DGL 数据集准备函数
@@ -127,6 +274,10 @@ def prepare_ogb_dataset(pyg_name, tag):
 
 # 选择并准备指定数据集的函数
 def prepare_dataset(tag):
+        # 检查是否为用户自定义的数据集
+    if tag in USER_DATASET_CONFIG:
+        return prepare_user_dataset_from_edgelist(tag)
+
     if tag=='reddit':
         return prepare_pyg_dataset('reddit', tag)
     elif tag=='flickr':
