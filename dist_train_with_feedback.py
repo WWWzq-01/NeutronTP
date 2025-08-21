@@ -7,7 +7,6 @@ from info_feedback_system import InfoFeedbackSystem
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.cuda.amp import autocast
 import numpy as np
 from sklearn.metrics import f1_score
@@ -21,22 +20,18 @@ def f1(y_true, y_pred, multilabel=True):
     y_true = y_true.cpu().numpy()
     y_pred = y_pred.cpu().numpy()
     if multilabel:
-        # 对预测值进行二值化
         y_pred[y_pred > 0.5] = 1.0
         y_pred[y_pred <= 0.5] = 0.0
-        # 在一些节点（10、100、1000）上打印预测值和真实值
         for node in [10,100,1000]:
             DistEnv.env.logger.log('pred', y_pred[node] , rank=0)
             DistEnv.env.logger.log('true', y_true[node] , rank=0)
     else:
-        # 如果是单标签分类，将预测值转为类别索引
         y_pred = np.argmax(y_pred, axis=1)
-    # 返回 micro 和 macro 两种平均方式的 F1 分数
     return f1_score(y_true, y_pred, average="micro"), \
            f1_score(y_true, y_pred, average="macro")
 
 def train_with_feedback(g, env, args, feedback_system: InfoFeedbackSystem):
-    """集成信息互馈的训练函数"""
+    """集成信息互馈的训练函数（性能优化版）"""
     if args.model == 'GCN':
         model = GCN(g, env, hidden_dim=args.hidden, nlayers=args.nlayers)
     elif args.model == 'CachedGCN':
@@ -54,113 +49,129 @@ def train_with_feedback(g, env, args, feedback_system: InfoFeedbackSystem):
     elif args.model == 'TensplitGAT':
         model = TensplitGAT(g, env, hidden_dim=args.hidden, nlayers=args.nlayers)
 
-    # 创建优化器（Adam）
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     if g.labels.dim()==1:
-        # 对于单标签分类，使用交叉熵损失函数
-        loss_func = nn.CrossEntropyLoss(reduction='none')  # 改为none以获取每个节点的损失
-    elif g.labels.dim()==2:
-        # 对于多标签分类，使用 BCEWithLogitsLoss 损失函数
-        loss_func = nn.BCEWithLogitsLoss(reduction='none')  # 改为none以获取每个节点的损失
+        loss_func = nn.CrossEntropyLoss(reduction='none')
+    else:
+        loss_func = nn.BCEWithLogitsLoss(reduction='none')
+
+    # 性能优化：动态调整反馈频率
+    base_feedback_every = getattr(args, 'feedback_every', 5)
+    adaptive_feedback = getattr(args, 'adaptive_feedback', True)
     
-    # 训练循环
+    def get_feedback_interval(epoch: int, total_epochs: int) -> int:
+        """动态计算反馈间隔"""
+        if not adaptive_feedback:
+            return base_feedback_every
+        
+        # 早期阶段：每个epoch都反馈，快速建立收敛基线
+        if epoch < total_epochs * 0.4:
+            return 1
+        # 中期阶段：适中反馈
+        elif epoch < total_epochs * 0.8:
+            return max(2, base_feedback_every // 2)  
+        # 后期阶段：减少反馈频率
+        else:
+            return base_feedback_every
+
     for epoch in range(args.epoch):
         with env.timer.timing('epoch'):
             with autocast(env.half_enabled):
-                # 前向传播，计算输出
-                outputs = model(g.features)
-                
-                # 梯度清零
+                with env.timer.timing('forward'):
+                    outputs = model(g.features)
                 optimizer.zero_grad()
-                
+
                 if g.local_labels[g.local_train_mask].size(0) > 0:
-                    # 获取训练节点
                     train_nodes = torch.where(g.local_train_mask)[0]
+
+                    # 动态调整反馈频率
+                    current_feedback_every = get_feedback_interval(epoch, args.epoch)
+                    do_feedback = feedback_system.is_enabled() and (epoch % current_feedback_every == 0)
                     
-                    # 使用信息互馈系统获取自适应batch
-                    if feedback_system.is_enabled():
-                        batch_size = min(args.batch_size if hasattr(args, 'batch_size') else len(train_nodes), 
-                                       len(train_nodes))
-                        batch_nodes = feedback_system.get_adaptive_batch(batch_size, epoch, g.local_train_mask)
+                    if do_feedback:
+                        # 性能优化：自适应batch大小
+                        base_batch_size = getattr(args, 'batch_size', len(train_nodes))
+                        adaptive_batch_size = min(base_batch_size, len(train_nodes))
                         
-                        # 边界情况处理：如果batch为空，跳过反馈处理
+                        # 根据节点收敛率调整batch大小
+                        if epoch > 0 and epoch % 10 == 0:
+                            status = feedback_system.get_status()
+                            if 'convergence_rate' in status and status['convergence_rate'] > 0.5:
+                                # 大量节点已收敛，减小batch大小
+                                adaptive_batch_size = max(adaptive_batch_size // 2, 100)
+                        
+                        with env.timer.timing('feedback.sample'):
+                            batch_nodes = feedback_system.get_adaptive_batch(
+                                adaptive_batch_size, epoch, g.local_train_mask)
                         if len(batch_nodes) == 0:
-                            env.logger.log(f"Warning: Empty batch at epoch {epoch}, skipping feedback processing", rank=0)
-                            # 使用所有训练节点进行标准训练
                             batch_nodes = train_nodes
-                            loss = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean()
-                            loss.backward()
-                        else:
-                            # 计算batch上的损失
-                            if g.labels.dim() == 1:
-                                batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes])
-                            else:
-                                batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean(dim=1)
-                            
-                            # 计算总损失
-                            loss = batch_losses.mean()
-                            
-                            # 处理信息互馈
-                            # 获取节点梯度信息 - 使用简化的方法
-                            batch_outputs = outputs[batch_nodes]
-                            
-                            # 计算梯度
-                            loss.backward(retain_graph=True)
-                            
-                            # 使用损失值作为梯度的替代指标
-                            # 这样可以避免复杂的梯度获取逻辑
-                            node_gradients = batch_losses.detach().clone()
-                            
-                            # 处理反馈信息
-                            feedback_info = feedback_system.process_feedback(
-                                batch_nodes, batch_losses.detach(), 
-                                node_gradients, batch_outputs.detach(), epoch)
-                            
-                            # 根据反馈调整策略
-                            if feedback_info:
-                                convergence_rate = feedback_info['convergence_rate']
-                                feedback_system.adjust_strategy(epoch, convergence_rate)
-                                
-                                # 记录反馈信息
-                                env.logger.log(f"Epoch {epoch} | Feedback: {convergence_rate:.3f} nodes converged", rank=0)
-                            
-                            # 重新计算损失（因为retain_graph=True会消耗梯度）
-                            optimizer.zero_grad()
-                            loss = batch_losses.mean()
-                            loss.backward()
                     else:
-                        # 如果没有启用反馈系统，使用所有训练节点
                         batch_nodes = train_nodes
-                        loss = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean()
+
+                    with env.timer.timing('loss'):
+                        if g.labels.dim() == 1:
+                            batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes])
+                        else:
+                            batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean(dim=1)
+                        loss = batch_losses.mean()
+
+                    with env.timer.timing_cuda('backward'):
                         loss.backward()
-                
-                # 参数更新
-                optimizer.step()
-                
-                # 输出当前的损失信息
+
+                    # 在完成 backward 后，再做轻量的互馈处理（不涉及再反向）
+                    if do_feedback:
+                        # 优化：使用torch.no_grad()减少内存开销
+                        with torch.no_grad():
+                            node_gradients = batch_losses.detach()
+                            batch_outputs = outputs[batch_nodes].detach()
+                            
+                        with env.timer.timing('feedback.process'):
+                            feedback_info = feedback_system.process_feedback(
+                                batch_nodes, batch_losses.detach(), node_gradients, batch_outputs, epoch)
+                        
+                        if feedback_info:
+                            env.logger.log(f"Epoch {epoch} | Feedback: {feedback_info['convergence_rate']:.3f} nodes converged (interval: {current_feedback_every})", rank=0)
+                else:
+                    env.logger.log('Warning: no training nodes in this partition! Backward fake loss.')
+                    with env.timer.timing('loss'):
+                        loss = (outputs * 0).sum()
+                    with env.timer.timing_cuda('backward'):
+                        loss.backward()
+
+                with env.timer.timing_cuda('opt.step'):
+                    optimizer.step()
                 env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
 
-        # 每10个epoch或最后一个epoch进行评估
         if epoch%10==0 or epoch==args.epoch-1:
-            # 收集所有节点的输出，并拼接在一起
-            all_outputs = env.all_gather_then_cat(outputs)
+            with env.timer.timing('eval.gather'):
+                all_outputs = env.all_gather_then_cat(outputs)
             if g.labels.dim()>1:
-                # 如果是多标签分类，计算 F1 分数并打印
                 mask = g.train_mask
                 env.logger.log(f'Epoch: {epoch:03d}', f1(g.labels[mask], torch.sigmoid(all_outputs[mask])), rank=0)
             else:
-                # 如果是单标签分类，计算并打印训练/验证/测试的准确率
                 acc = lambda mask: all_outputs[mask].max(1)[1].eq(g.labels[mask]).sum().item()/mask.sum().item()
                 env.logger.log(f'Epoch: {epoch:03d}, Train: {acc(g.train_mask):.4f}, Val: {acc(g.val_mask):.4f}, Test: {acc(g.test_mask):.4f}', rank=0)
-        
-        # 打印信息互馈系统状态
-        if feedback_system.is_enabled() and epoch % 5 == 0:
+
+        # 性能优化：减少状态打印频率
+        if feedback_system.is_enabled() and epoch % max(10, base_feedback_every * 2) == 0:
             status = feedback_system.get_status()
             env.logger.log(f"Epoch {epoch} | Feedback System Status: {status}", rank=0)
+            
+            # 动态调整采样策略
+            if 'convergence_rate' in status:
+                feedback_system.adjust_strategy(epoch, status['convergence_rate'])
+                
+        # 早停检查
+        enable_early_stopping = getattr(args, 'enable_early_stopping', False)
+        if feedback_system.is_enabled() and enable_early_stopping:
+            should_stop, stop_reason = feedback_system.should_early_stop(epoch)
+            if should_stop:
+                env.logger.log(f"Early stopping triggered at epoch {epoch}: {stop_reason}", rank=0)
+                break
 
 
 def train(g, env, args):
-    """原始训练函数（保持兼容性）"""
+    """原始训练函数（保持兼容性，加入时间统计）"""
     if args.model == 'GCN':
         model = GCN(g, env, hidden_dim=args.hidden, nlayers=args.nlayers)
     elif args.model == 'CachedGCN':
@@ -178,44 +189,38 @@ def train(g, env, args):
     elif args.model == 'TensplitGAT':
         model = TensplitGAT(g, env, hidden_dim=args.hidden, nlayers=args.nlayers)
 
-    # 创建优化器（Adam）
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     if g.labels.dim()==1:
-        # 对于单标签分类，使用交叉熵损失函数
         loss_func = nn.CrossEntropyLoss()
     elif g.labels.dim()==2:
-        # 对于多标签分类，使用 BCEWithLogitsLoss 损失函数
         loss_func = nn.BCEWithLogitsLoss(reduction='mean')
     
     for epoch in range(args.epoch):
         with env.timer.timing('epoch'):
             with autocast(env.half_enabled):
-                # 前向传播，计算输出
-                outputs = model(g.features)
-                # 梯度清零
+                with env.timer.timing('forward'):
+                    outputs = model(g.features)
                 optimizer.zero_grad()
                 if g.local_labels[g.local_train_mask].size(0) > 0:
-                    # 计算损失（仅在包含训练节点的分区上计算）
-                    loss = loss_func(outputs[g.local_train_mask], g.local_labels[g.local_train_mask])
+                    with env.timer.timing('loss'):
+                        loss = loss_func(outputs[g.local_train_mask], g.local_labels[g.local_train_mask])
                 else:
-                    # 如果没有训练节点，输出警告并使用虚拟损失
                     env.logger.log('Warning: no training nodes in this partition! Backward fake loss.')
-                    loss = (outputs * 0).sum()
-            # 反向传播和参数更新
-            loss.backward()
-            optimizer.step()
-            # 输出当前的损失信息
+                    with env.timer.timing('loss'):
+                        loss = (outputs * 0).sum()
+            with env.timer.timing_cuda('backward'):
+                loss.backward()
+            with env.timer.timing_cuda('opt.step'):
+                optimizer.step()
             env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
 
         if epoch%10==0 or epoch==args.epoch-1:
-            # 收集所有节点的输出，并拼接在一起
-            all_outputs = env.all_gather_then_cat(outputs)
+            with env.timer.timing('eval.gather'):
+                all_outputs = env.all_gather_then_cat(outputs)
             if g.labels.dim()>1:
-                # 如果是多标签分类，计算 F1 分数并打印
                 mask = g.train_mask
                 env.logger.log(f'Epoch: {epoch:03d}', f1(g.labels[mask], torch.sigmoid(all_outputs[mask])), rank=0)
             else:
-                # 如果是单标签分类，计算并打印训练/验证/测试的准确率
                 acc = lambda mask: all_outputs[mask].max(1)[1].eq(g.labels[mask]).sum().item()/mask.sum().item()
                 env.logger.log(f'Epoch: {epoch:03d}, Train: {acc(g.train_mask):.4f}, Val: {acc(g.val_mask):.4f}, Test: {acc(g.test_mask):.4f}', rank=0)
 
@@ -226,12 +231,10 @@ def main(env, args):
 
     env.half_enabled = True
     env.half_enabled = False
-    
-    # 打印进程开始信息
+
     env.logger.log('proc begin:', env)
-    
+
     with env.timer.timing('total'):
-        # 使用 Parted_COO_Graph 加载分布式环境下的图数据
         print("world size",env.world_size)
         if args.model == 'TensplitGCN':
             print(f"Rank: {env.rank}, world_size: {env.world_size}")
@@ -247,34 +250,61 @@ def main(env, args):
             g = Parted_COO_Graph(args.dataset, env.rank, env.world_size, env.device, env.half_enabled, env.csr_enabled)
         else:
             g = Parted_COO_Graph(args.dataset, env.rank, env.world_size, env.device, env.half_enabled, env.csr_enabled)
-        
+
         env.logger.log('graph loaded', g)
         env.logger.log('graph loaded\n', torch.cuda.memory_summary())
-        
-        # 初始化信息互馈系统
+
+        # 初始化信息互馈系统（增加候选池与统计开关）
         enable_feedback = getattr(args, 'enable_feedback', True)
-        feedback_system = InfoFeedbackSystem(g.num_nodes, env.device, enable_feedback)
+        sampler_candidate_pool_size = getattr(args, 'sampler_candidate_pool_size', None)
+        keep_sampling_stats = getattr(args, 'keep_sampling_stats', False)
+        similarity_threshold = getattr(args, 'similarity_threshold', None)
+        patience = getattr(args, 'patience', None)
+        min_epochs = getattr(args, 'min_epochs', None)
+        sampling_strategy = getattr(args, 'sampling_strategy', None)
         
-        # 根据是否启用反馈系统选择训练函数
+        # 新增：性能优化参数
+        feedback_batch_cap = getattr(args, 'feedback_batch_cap', None)
+        use_simple_convergence = getattr(args, 'use_simple_convergence', True)
+        
+        # 早停机制参数
+        enable_early_stopping = getattr(args, 'enable_early_stopping', False)
+        early_stop_threshold = getattr(args, 'early_stop_threshold', 0.02)
+        early_stop_patience = getattr(args, 'early_stop_patience', 3)
+        min_epochs_before_stop = getattr(args, 'min_epochs_before_stop', 5)
+        
+        feedback_system = InfoFeedbackSystem(
+            g.num_nodes, env.device, enable_feedback,
+            sampler_candidate_pool_size=sampler_candidate_pool_size,
+            keep_sampling_stats=keep_sampling_stats,
+            similarity_threshold=similarity_threshold,
+            patience=patience,
+            min_epochs=min_epochs,
+            sampling_strategy=sampling_strategy,
+            feedback_batch_cap=feedback_batch_cap,
+            use_simple_convergence=use_simple_convergence,
+            enable_early_stopping=enable_early_stopping,
+            early_stop_threshold=early_stop_threshold,
+            early_stop_patience=early_stop_patience,
+            min_epochs_before_stop=min_epochs_before_stop
+        )
+
         if enable_feedback:
             env.logger.log('Starting training with Info-Feedback system', rank=0)
             train_with_feedback(g, env, args, feedback_system)
         else:
             env.logger.log('Starting standard training without feedback', rank=0)
-            train(g, env, args)
-    
-    # 打印model信息
-    if env.rank == 0:    
+            from dist_train import train as train_plain
+            train_plain(g, env, args)
+
+    if env.rank == 0:
         print(f"Model: {args.model} layers: {args.nlayers} nprocs {args.nprocs}")
         if enable_feedback:
             print("Info-Feedback system was enabled")
         else:
             print("Info-Feedback system was disabled")
-    
-    # 打印计时器的总结信息
+
     env.logger.log(env.timer.summary_all(), rank=0)
-    
-    # 打印信息互馈系统最终状态
     if enable_feedback:
         final_status = feedback_system.get_status()
         env.logger.log(f"Final Feedback System Status: {final_status}", rank=0)

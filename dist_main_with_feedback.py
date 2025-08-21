@@ -104,13 +104,39 @@ if __name__ == "__main__":
                        help="启用信息互馈系统")
     parser.add_argument("--disable_feedback", action="store_true", 
                        help="禁用信息互馈系统，使用标准训练")
-    parser.add_argument("--batch_size", type=int, default=1000,
+    parser.add_argument("--batch_size", type=int, default=10000,
                        help="训练batch大小（仅在启用反馈系统时有效）")
-    parser.add_argument("--convergence_threshold", type=float, default=0.01,
-                       help="节点收敛阈值")
-    parser.add_argument("--sampling_strategy", type=str, default='adaptive_importance',
-                       choices=['adaptive_importance', 'convergence_aware', 'random'],
-                       help="采样策略")
+    
+    # 收敛检测参数（实际使用的参数）
+    parser.add_argument("--similarity_threshold", type=float, default=0.60,
+                       help="嵌入相似性阈值（0.5-0.95，用于判断节点收敛）")
+    parser.add_argument("--patience", type=int, default=1,
+                       help="收敛判断需要连续满足的epoch数")
+    parser.add_argument("--min_epochs", type=int, default=1,
+                       help="开始收敛检查的最小epoch数")
+    
+    # 采样策略
+    parser.add_argument('--sampling_strategy', type=str, default='convergence_aware',
+                       choices=['adaptive_importance', 'convergence_aware', 'random', 'no_importance'],
+                       help='采样策略')
+    
+    # 性能优化参数
+    parser.add_argument('--feedback_batch_cap', type=int, default=20000,
+                       help='反馈批大小上限（用于限制反馈处理的节点数量）')
+    parser.add_argument('--ema_decay', type=float, default=0.9,
+                       help='EMA衰减率（0.8-0.95，仅在EMA模式下使用）')
+    parser.add_argument('--use_simple_convergence', action='store_true', default=True,
+                       help='使用简单收敛模式（直接比较嵌入相似性，推荐）')
+    
+    # 早停机制参数
+    parser.add_argument('--enable_early_stopping', action='store_true', default=True,
+                       help='启用基于收敛率的早停机制')
+    parser.add_argument('--early_stop_threshold', type=float, default=0.20,
+                       help='早停收敛率阈值（默认10%节点收敛时停止）')
+    parser.add_argument('--early_stop_patience', type=int, default=2,
+                       help='早停耐心值（连续几个epoch满足条件后停止）')
+    parser.add_argument('--min_epochs_before_stop', type=int, default=10,
+                       help='早停前的最小训练轮数')
     
     args = parser.parse_args()
     
@@ -127,7 +153,20 @@ if __name__ == "__main__":
     if args.enable_feedback:
         print(f"采样策略: {args.sampling_strategy}")
         print(f"Batch大小: {args.batch_size}")
-        print(f"收敛阈值: {args.convergence_threshold}")
+        print(f"相似性阈值: {args.similarity_threshold}")
+        print(f"收敛耐心值: {args.patience}")
+        print(f"最小训练轮数: {args.min_epochs}")
+        print(f"反馈批大小上限: {args.feedback_batch_cap}")
+        print(f"简单收敛模式: {args.use_simple_convergence}")
+        if not args.use_simple_convergence:
+            print(f"EMA衰减率: {args.ema_decay}")
+        if args.enable_early_stopping:
+            print(f"早停机制: 启用")
+            print(f"  - 收敛率阈值: {args.early_stop_threshold:.1%}")
+            print(f"  - 早停耐心值: {args.early_stop_patience}")
+            print(f"  - 最小训练轮数: {args.min_epochs_before_stop}")
+        else:
+            print(f"早停机制: 禁用")
     print("=" * 60)
     
     process_args = (args, dist_train_with_feedback.main)
