@@ -48,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_epochs", type=int, default=1, help="开始判断的最小epoch")
 
     # 采样策略
-    parser.add_argument("--sampling_strategy", type=str, default='no_importance',
+    parser.add_argument("--sampling_strategy", type=str, default='convergence_aware',
                         choices=['no_importance', 'random', 'convergence_aware', 'adaptive_importance'],
                         help="采样策略。no_importance=均匀采样且过滤已收敛节点")
 

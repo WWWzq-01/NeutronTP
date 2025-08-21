@@ -104,11 +104,11 @@ if __name__ == "__main__":
                        help="启用信息互馈系统")
     parser.add_argument("--disable_feedback", action="store_true", 
                        help="禁用信息互馈系统，使用标准训练")
-    parser.add_argument("--batch_size", type=int, default=10000,
+    parser.add_argument("--batch_size", type=int, default=20000,
                        help="训练batch大小（仅在启用反馈系统时有效）")
     
     # 收敛检测参数（实际使用的参数）
-    parser.add_argument("--similarity_threshold", type=float, default=0.60,
+    parser.add_argument("--similarity_threshold", type=float, default=0.65,
                        help="嵌入相似性阈值（0.5-0.95，用于判断节点收敛）")
     parser.add_argument("--patience", type=int, default=1,
                        help="收敛判断需要连续满足的epoch数")
@@ -128,15 +128,19 @@ if __name__ == "__main__":
     parser.add_argument('--use_simple_convergence', action='store_true', default=True,
                        help='使用简单收敛模式（直接比较嵌入相似性，推荐）')
     
-    # 早停机制参数
-    parser.add_argument('--enable_early_stopping', action='store_true', default=True,
-                       help='启用基于收敛率的早停机制')
-    parser.add_argument('--early_stop_threshold', type=float, default=0.20,
-                       help='早停收敛率阈值（默认10%节点收敛时停止）')
-    parser.add_argument('--early_stop_patience', type=int, default=2,
-                       help='早停耐心值（连续几个epoch满足条件后停止）')
-    parser.add_argument('--min_epochs_before_stop', type=int, default=10,
-                       help='早停前的最小训练轮数')
+    # 早停机制参数（已禁用，现在只使用基于本地节点全收敛的早停）
+    parser.add_argument('--enable_early_stopping', action='store_false', default=False,
+                       help='禁用基于收敛率的早停机制（已禁用）')
+    parser.add_argument('--early_stop_threshold', type=float, default=1.0,
+                       help='早停收敛率阈值（已禁用）')
+    parser.add_argument('--early_stop_patience', type=int, default=999,
+                       help='早停耐心值（已禁用）')
+    parser.add_argument('--min_epochs_before_stop', type=int, default=999,
+                       help='早停前的最小训练轮数（已禁用）')
+    
+    # 候选池大小参数  
+    parser.add_argument('--candidate_pool_size', type=int, default=None,
+                       help='候选池大小，设置为None使用所有训练节点（推荐2000-5000）')
     
     args = parser.parse_args()
     

@@ -387,6 +387,9 @@ class AdaptiveSampler:
         self.sampling_strategy = sampling_strategy
         self.candidate_pool_size = candidate_pool_size
         
+        # 调试信息：打印候选池大小
+        print(f"[DEBUG] AdaptiveSampler initialized with candidate_pool_size: {candidate_pool_size}")
+        
         self.keep_sampling_stats = keep_sampling_stats
         if keep_sampling_stats:
             self.sampling_counts = torch.zeros(num_nodes, dtype=torch.long)
@@ -414,10 +417,14 @@ class AdaptiveSampler:
             self.last_sampling_epoch[nodes_cpu] = epoch
         
     def _pick_candidates(self, train_nodes: torch.Tensor) -> torch.Tensor:
+        print(f"[DEBUG] _pick_candidates: train_nodes={len(train_nodes)}, candidate_pool_size={self.candidate_pool_size}")
         if self.candidate_pool_size is None or len(train_nodes) <= self.candidate_pool_size:
+            print(f"[DEBUG] Using all {len(train_nodes)} training nodes (no pool limit)")
             return train_nodes
         idx = torch.randperm(len(train_nodes), device=train_nodes.device)[:self.candidate_pool_size]
-        return train_nodes[idx]
+        result = train_nodes[idx]
+        print(f"[DEBUG] Sampled {len(result)} nodes from candidate pool")
+        return result
     
     def sample_nodes(self, batch_size: int, epoch: int, 
                     train_mask: torch.Tensor) -> torch.Tensor:
