@@ -108,7 +108,7 @@ if __name__ == "__main__":
                        help="训练batch大小（仅在启用反馈系统时有效）")
     
     # 收敛检测参数（实际使用的参数）
-    parser.add_argument("--similarity_threshold", type=float, default=0.65,
+    parser.add_argument("--similarity_threshold", type=float, default=0.85,
                        help="嵌入相似性阈值（0.5-0.95，用于判断节点收敛）")
     parser.add_argument("--patience", type=int, default=1,
                        help="收敛判断需要连续满足的epoch数")

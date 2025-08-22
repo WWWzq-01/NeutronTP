@@ -113,82 +113,94 @@ def train_with_feedback(g, env, args, feedback_system: InfoFeedbackSystem):
                             batch_nodes = feedback_system.get_adaptive_batch(
                                 adaptive_batch_size, epoch, g.local_train_mask)
                         
-                        # 如果所有节点都已收敛，直接早停
-                        if len(batch_nodes) == 0:
-                            env.logger.log(f"Epoch {epoch} | All local training nodes converged, triggering early stop", rank=0)
-                            break  # 直接跳出训练循环
+                        # 多数进程收敛则全局early stop
+                        local_all_converged = (len(batch_nodes) == 0)
+                        
+                        if dist.is_available() and dist.is_initialized():
+                            # 收集所有进程的收敛状态
+                            local_status = torch.tensor([1 if local_all_converged else 0], device=env.device)
+                            world_size = dist.get_world_size()
+                            all_status = [torch.zeros_like(local_status) for _ in range(world_size)]
+                            dist.all_gather(all_status, local_status)
+                            
+                            converged_processes = sum(int(status.item()) for status in all_status)
+                            # majority_threshold = world_size // 2 + 1  # 超过一半
+                            majority_threshold = 1  # 超过四分之一
+                            
+                            if converged_processes >= majority_threshold:
+                                # 多数进程收敛，全局early stop
+                                env.logger.log(f"Epoch {epoch} | {converged_processes}/{world_size} processes converged (majority), triggering global early stop", rank=0)
+                                break
                         else:
-                            # 正常训练逻辑
-                            with env.timer.timing('loss'):
-                                if g.labels.dim() == 1:
-                                    batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes])
-                                else:
-                                    batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean(dim=1)
-                                loss = batch_losses.mean()
-
-                            with env.timer.timing_cuda('backward'):
-                                loss.backward()
-
-                            # 在完成 backward 后，再做轻量的互馈处理（不涉及再反向）
-                            if do_feedback:
-                                # 优化：使用torch.no_grad()减少内存开销
-                                with torch.no_grad():
-                                    node_gradients = batch_losses.detach()
-                                    batch_outputs = outputs[batch_nodes].detach()
-                                    
-                                with env.timer.timing('feedback.process'):
-                                    feedback_info = feedback_system.process_feedback(
-                                        batch_nodes, batch_losses.detach(), node_gradients, batch_outputs, epoch)
-                                
-                                if feedback_info:
-                                    env.logger.log(f"Epoch {epoch} | Feedback: {feedback_info['convergence_rate']:.3f} nodes converged (interval: {current_feedback_every})", rank=0)
-
-                                # 快速验证：本 rank 训练集内已收敛与剩余数量 + 全局汇总
-                                try:
-                                    train_nodes_cpu_set = set(map(int, train_nodes.detach().to('cpu').numpy().tolist()))
-                                    converged_set = set()
-                                    # 读取当前已收敛节点集合
-                                    if hasattr(feedback_system, 'feedback_controller') and feedback_system.feedback_controller is not None:
-                                        converged_set = set(feedback_system.feedback_controller.convergence_tracker.get_converged_nodes())
-                                    local_converged_in_train = sum((1 for nid in converged_set if nid in train_nodes_cpu_set))
-                                    local_remaining = len(train_nodes_cpu_set) - local_converged_in_train
-
-                                    # 全局求和（各 rank 训练集互不重叠时，该和即全局训练集中已收敛数）
-                                    global_converged = torch.tensor([local_converged_in_train], device=env.device, dtype=torch.long)
-                                    if dist.is_available() and dist.is_initialized():
-                                        dist.all_reduce(global_converged, op=dist.ReduceOp.SUM)
-
-                                    env.logger.log(
-                                        f"Epoch {epoch} | Local converged in-train: {local_converged_in_train}, Remaining: {local_remaining}",
-                                        rank=0
-                                    )
-                                    if dist.is_available() and dist.is_initialized():
-                                        env.logger.log(
-                                            f"Epoch {epoch} | Global converged in-train: {int(global_converged.item())}",
-                                            rank=0
-                                        )
-                                except Exception:
-                                    pass
-
-                            with env.timer.timing_cuda('opt.step'):
-                                optimizer.step()
-                            env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
+                            # 单机模式
+                            if local_all_converged:
+                                env.logger.log(f"Epoch {epoch} | All local training nodes converged, triggering early stop", rank=0)
+                                break
+                        
+                        # 如果没有early stop，继续正常训练
+                        if len(batch_nodes) == 0:
+                            # 本地收敛但未达到全局early stop条件，跳过这个epoch
+                            env.logger.log(f"Epoch {epoch} | Local converged but global threshold not met, skipping training", rank=0)
+                            continue
                     else:
                         # 非反馈模式，使用所有训练节点
                         batch_nodes = train_nodes
-                        with env.timer.timing('loss'):
-                            if g.labels.dim() == 1:
-                                batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes])
-                            else:
-                                batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean(dim=1)
-                            loss = batch_losses.mean()
 
-                        with env.timer.timing_cuda('backward'):
-                            loss.backward()
+                    # 正常训练逻辑
+                    with env.timer.timing('loss'):
+                        if g.labels.dim() == 1:
+                            batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes])
+                        else:
+                            batch_losses = loss_func(outputs[batch_nodes], g.local_labels[batch_nodes]).mean(dim=1)
+                        loss = batch_losses.mean()
+
+                    with env.timer.timing_cuda('backward'):
+                        loss.backward()
+
+                    # 在完成 backward 后，再做轻量的互馈处理（不涉及再反向）
+                    if do_feedback:
+                        # 优化：使用torch.no_grad()减少内存开销
+                        with torch.no_grad():
+                            node_gradients = batch_losses.detach()
+                            batch_outputs = outputs[batch_nodes].detach()
+                            
+                        with env.timer.timing('feedback.process'):
+                            feedback_info = feedback_system.process_feedback(
+                                batch_nodes, batch_losses.detach(), node_gradients, batch_outputs, epoch)
                         
-                        with env.timer.timing_cuda('opt.step'):
-                            optimizer.step()
-                        env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
+                        if feedback_info:
+                            env.logger.log(f"Epoch {epoch} | Feedback: {feedback_info['convergence_rate']:.3f} nodes converged (interval: {current_feedback_every})", rank=0)
+
+                        # 快速验证：本 rank 训练集内已收敛与剩余数量 + 全局汇总
+                        try:
+                            train_nodes_cpu_set = set(map(int, train_nodes.detach().to('cpu').numpy().tolist()))
+                            converged_set = set()
+                            # 读取当前已收敛节点集合
+                            if hasattr(feedback_system, 'feedback_controller') and feedback_system.feedback_controller is not None:
+                                converged_set = set(feedback_system.feedback_controller.convergence_tracker.get_converged_nodes())
+                            local_converged_in_train = sum((1 for nid in converged_set if nid in train_nodes_cpu_set))
+                            local_remaining = len(train_nodes_cpu_set) - local_converged_in_train
+
+                            # 全局求和（各 rank 训练集互不重叠时，该和即全局训练集中已收敛数）
+                            global_converged = torch.tensor([local_converged_in_train], device=env.device, dtype=torch.long)
+                            if dist.is_available() and dist.is_initialized():
+                                dist.all_reduce(global_converged, op=dist.ReduceOp.SUM)
+
+                            env.logger.log(
+                                f"Epoch {epoch} | Local converged in-train: {local_converged_in_train}, Remaining: {local_remaining}",
+                                rank=0
+                            )
+                            if dist.is_available() and dist.is_initialized():
+                                env.logger.log(
+                                    f"Epoch {epoch} | Global converged in-train: {int(global_converged.item())}",
+                                    rank=0
+                                )
+                        except Exception:
+                            pass
+
+                    with env.timer.timing_cuda('opt.step'):
+                        optimizer.step()
+                    env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
                 else:
                     env.logger.log('Warning: no training nodes in this partition! Backward fake loss.')
                     with env.timer.timing('loss'):

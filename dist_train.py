@@ -62,26 +62,32 @@ def train(g, env, args):
     for epoch in range(args.epoch):
         with env.timer.timing('epoch'):
             with autocast(env.half_enabled):
-                # 前向传播，计算输出
-                outputs = model(g.features)
+                with env.timer.timing('forward'):
+                    # 前向传播，计算输出
+                    outputs = model(g.features)
                 # 梯度清零
                 optimizer.zero_grad()
                 if g.local_labels[g.local_train_mask].size(0) > 0:
-                    # 计算损失（仅在包含训练节点的分区上计算）
-                    loss = loss_func(outputs[g.local_train_mask], g.local_labels[g.local_train_mask])
+                    with env.timer.timing('loss'):
+                        # 计算损失（仅在包含训练节点的分区上计算）
+                        loss = loss_func(outputs[g.local_train_mask], g.local_labels[g.local_train_mask])
                 else:
                     # 如果没有训练节点，输出警告并使用虚拟损失
                     env.logger.log('Warning: no training nodes in this partition! Backward fake loss.')
-                    loss = (outputs * 0).sum()
+                    with env.timer.timing('loss'):
+                        loss = (outputs * 0).sum()
             # 反向传播和参数更新
-            loss.backward()
-            optimizer.step()
+            with env.timer.timing_cuda('backward'):
+                loss.backward()
+            with env.timer.timing_cuda('opt.step'):
+                optimizer.step()
             # 输出当前的损失信息
             env.logger.log("Epoch {:05d} | Loss {:.4f}".format(epoch, loss.item()), rank=0)
 
         if epoch%10==0 or epoch==args.epoch-1:
-            # 收集所有节点的输出，并拼接在一起
-            all_outputs = env.all_gather_then_cat(outputs)
+            with env.timer.timing('eval.gather'):
+                # 收集所有节点的输出，并拼接在一起
+                all_outputs = env.all_gather_then_cat(outputs)
             if g.labels.dim()>1:
                 # 如果是多标签分类，计算 F1 分数并打印
                 mask = g.train_mask
@@ -124,6 +130,8 @@ def main(env, args):
     # 打印model信息
     if env.rank == 0:    
         print(f"Model: {args.model} layers: {args.nlayers} nprocs {args.nprocs}")
+        print("Regular training mode (without Info-Feedback system)")
     # 打印计时器的总结信息
+    env.logger.log("Average and std of durations across all ranks:", rank=0)
     env.logger.log(env.timer.summary_all(), rank=0)
     # env.logger.log(env.timer.detail_all(), rank=0)
