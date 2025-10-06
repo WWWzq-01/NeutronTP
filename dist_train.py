@@ -52,6 +52,7 @@ def train(g, env, args):
     # print("optimizer")
     # 创建优化器（Adam）
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    print("g.labels.dim",g.labels.dim())
     if g.labels.dim()==1:
         # 对于单标签分类，使用交叉熵损失函数
         loss_func = nn.CrossEntropyLoss()
@@ -98,8 +99,7 @@ def main(env, args):
 
     env.half_enabled = True
     env.half_enabled = False
-    # 打印进程开始信息
-    env.logger.log('proc begin:', env)
+    # 打印进程开始信    env.logger.log('proc begin:', env)
     with env.timer.timing('total'):
         # 使用 Parted_COO_Graph 加载分布式环境下的图数据
         print("world size",env.world_size)

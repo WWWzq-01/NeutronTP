@@ -72,6 +72,9 @@ class GCN(nn.Module):
         super().__init__()
         self.g, self.env = g, env
         in_dim, out_dim = g.features.size(1), g.num_classes
+        print("in_dim: ",in_dim)
+        print("out_dim: ",out_dim)
+        print("hidden_dim: " ,hidden_dim)
         torch.manual_seed(0)
 
         self.layers = nn.ParameterList()

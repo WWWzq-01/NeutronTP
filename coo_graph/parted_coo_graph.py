@@ -14,7 +14,9 @@ class BasicGraph:
         self.features = d['features']
         self.labels = d['labels'].to(device).to(torch.float if d['labels'].dim()==2 else torch.long)
         self.train_mask, self.val_mask, self.test_mask = (d[t].bool().to(device) for t in ("train_mask", 'val_mask', 'test_mask'))
-        self.num_nodes, self.num_edges, self.num_classes = d["num_nodes"], d['num_edges'], d['num_classes']
+        self.num_nodes = int(d["num_nodes"])
+        self.num_edges = int(d['num_edges'])
+        self.num_classes = int(d['num_classes'])
 
     def __repr__(self):
         # 返回图的字符串表示

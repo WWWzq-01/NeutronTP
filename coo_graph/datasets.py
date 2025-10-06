@@ -257,18 +257,42 @@ def prepare_ogb_dataset(pyg_name, tag):
     print('ogb dataset', pyg_name, 'loaded')
     # 获取数据集中的第一个数据对象
     data: torch_geometric.data.Data = dataset[0]
-    # 获取数据集的拆分索引
-    split_idx = dataset.get_idx_split()
-    # 创建bool掩码
-    bool_mask = torch.zeros(data.num_nodes).bool()
-    # 创建填充掩码的函数
-    make_mask = lambda name: bool_mask.index_fill(0, split_idx[name], True)
     # 如果标签是 2D 的，将其转换为 1D
-    if data.y.dim()==2 and data.y.size(1)==1:
-        label_1d = torch.reshape(data.y, [-1])
+    if data.y.dim() == 2 and data.y.size(1) == 1:
+        label_1d = data.y.view(-1)
+    else:
+        label_1d = data.y
+
+    if pyg_name == 'ogbn-papers100M':
+        # 自定义 5:1:4 划分
+        generator = torch.Generator()
+        generator.manual_seed(42)
+        perm = torch.randperm(data.num_nodes, generator=generator)
+        train_size = int(data.num_nodes * 0.5)
+        val_size = int(data.num_nodes * 0.1)
+        train_idx = perm[:train_size]
+        val_idx = perm[train_size:train_size + val_size]
+        test_idx = perm[train_size + val_size:]
+        train_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
+        val_mask = torch.zeros_like(train_mask)
+        test_mask = torch.zeros_like(train_mask)
+        train_mask[train_idx] = True
+        val_mask[val_idx] = True
+        test_mask[test_idx] = True
+        del perm
+    else:
+        # 默认使用 OGB 提供的划分
+        split_idx = dataset.get_idx_split()
+        train_mask = torch.zeros(data.num_nodes, dtype=torch.bool)
+        val_mask = torch.zeros_like(train_mask)
+        test_mask = torch.zeros_like(train_mask)
+        train_mask[split_idx['train']] = True
+        val_mask[split_idx['valid']] = True
+        test_mask[split_idx['test']] = True
+
     # 保存数据集至指定路径
     save_dataset(data.edge_index, data.x, label_1d,
-                 make_mask('train'), make_mask('valid'), make_mask('test'),
+                 train_mask, val_mask, test_mask,
                  data.num_nodes, data.num_edges, dataset.num_classes, tag)
 
 
